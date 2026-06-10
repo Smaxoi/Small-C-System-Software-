@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# 虛擬環境
+venv/
+.venv/
+env/
+
+# 編輯器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# 作業系統
+.DS_Store
+Thumbs.db
+
+# 測試暫存輸出
+tests/test_output*.txt

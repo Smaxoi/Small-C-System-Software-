@@ -1,0 +1,30 @@
+﻿ABOUT
+HELP
+printf("%d\n", 3 + 4 * 5 - 2);
+printf("%d\n", (3 + 4) * (5 - 2));
+printf("%d\n", 100 / 7);
+printf("%d\n", 100 % 7);
+printf("%d\n", -15 / 4);
+printf("%d %d %d\n", 10 > 5, 10 < 5, 10 == 10);
+printf("%d %d\n", 10 > 5 && 3 < 1, 10 > 5 || 3 < 1);
+printf("%d\n", 0xAB & 0x0F);
+printf("%d\n", 1 << 10);
+printf("0x%x\n", 0xF0 | 0x0D);
+int x = 25;
+int y = -18;
+printf("abs(%d) = %d\n", y, abs(y));
+printf("max=%d, min=%d\n", max(x, 30), min(x, 30));
+printf("pow(2,16) = %d\n", pow(2, 16));
+printf("sqrt(625) = %d\n", sqrt(625));
+char ch = 'Z';
+printf("ch=%c, code=%d, next=%c\n", ch, ch, ch + 1);
+VARS
+char buf[50];
+strcpy(buf, "System");
+strcat(buf, " Software");
+printf("buf=\"%s\", len=%d\n", buf, strlen(buf));
+printf("cmp=%d\n", strcmp("apple", "banana"));
+printf("atoi=%d\n", atoi("2026"));
+char numstr[20];
+itoa(12345, numstr);
+printf("itoa result: %s\n", numstr);

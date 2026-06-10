@@ -1,0 +1,14 @@
+# Small-C Interactive Interpreter — Python Dependencies
+#
+# This project uses ONLY the Python standard library.
+# No third-party packages are required.
+#
+# Tested with: Python 3.10 / 3.11 / 3.12  (minimum: Python 3.8)
+#
+# Standard library modules used:
+#   sys      — I/O encoding, stdin/stdout control
+#   os       — file path handling, terminal clear
+#   re       — syntax highlighting (colorize in main.py)
+#   math     — sqrt, pow  (built-in function backend)
+#   random   — rand, srand (built-in function backend)
+#   io       — StringIO used in test_runner.py
