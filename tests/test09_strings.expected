@@ -1,0 +1,16 @@
+len=5
+Hello, World
+len=12
+cmp=0
+cmp=-1
+cmp=1
+atoi=12345
+atoi=-99
+itoa=42
+itoa=-7
+abs=42
+max=25
+min=10
+pow=256
+sqrt=9
+Program exited with return value 0.

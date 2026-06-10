@@ -1,0 +1,6 @@
+x=10, *p=10
+x=99 after *p=99
+y=21 after increment
+before: a=3 b=7
+after:  a=7 b=3
+Program exited with return value 0.

@@ -1,0 +1,6 @@
+x=10, y=20, z=30
+x=15, y=17
+x=30, y=8, z=2
+ch=A, code=65
+ch=B, code=66
+Program exited with return value 0.

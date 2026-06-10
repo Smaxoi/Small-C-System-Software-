@@ -1,0 +1,11 @@
+val=0xab
+low nibble=11
+high nibble=10
+1<<8=256
+xor=0xf0
+not low=240
+one
+two
+three
+other
+Program exited with return value 0.
