@@ -1,9 +1,15 @@
-# parser.py - Recursive-descent parser for Small-C
+# parser.py - Small-C 的「語法分析器 (Parser)」
+#
+# 【這個檔案的核心任務】
+#   把 Lexer 吐出的 Token 串列，組成一棵語法樹 (AST)。
+#   採用「遞迴下降 (Recursive Descent)」：每種語法寫一個 parse_xxx 函式，
+#   彼此呼叫的「層次」剛好對應運算子的「優先順序」（見下方運算式區塊）。
 
 from lexer import Lexer, TT, Token, LexError
 from nodes import *
 
 class ParseError(Exception):
+    """語法錯誤；帶行號，方便回報是哪一行寫錯。"""
     def __init__(self, msg, line=0):
         super().__init__(msg)
         self.line = line
@@ -36,11 +42,12 @@ def _tt_label(tt):
     return f"'{tt.lower()}'"   # 關鍵字：RETURN → 'return'
 
 class Parser:
+    """【語法分析器】拿著 Token 串列，用一個游標 pos 由前往後組成語法樹。"""
     def __init__(self, tokens):
-        self.tokens = tokens
-        self.pos = 0
+        self.tokens = tokens   # Lexer 產生的 Token 串列
+        self.pos = 0          # 目前看到第幾顆 token（核心游標）
 
-    # ── Token utilities ────────────────────────────────────────────────────
+    # ── Token 工具 ──────────────────────────────────────────────────────────
 
     def peek(self, offset=0):
         p = self.pos + offset
@@ -61,6 +68,7 @@ class Parser:
         return tok
 
     def expect(self, tt, msg=None):
+        """【斷言並前進】要求目前 token 必須是 tt，否則丟語法錯誤（如少了分號）。"""
         if self.cur_type() != tt:
             tok = self.cur()
             raise ParseError(
@@ -80,6 +88,7 @@ class Parser:
     # ── Top-level program ──────────────────────────────────────────────────
 
     def parse_program(self):
+        """【總入口】一直解析最上層項目，直到 EOF，全部裝進 Program。"""
         items = []
         while self.cur_type() != TT.EOF:
             item = self.parse_top_level()
@@ -88,14 +97,15 @@ class Parser:
         return Program(items)
 
     def parse_top_level(self):
+        """判斷最上層這一段是 #define、函式/全域變數、還是直接的陳述句。"""
         tok = self.cur()
-        # #define constant
+        # #define 常數
         if tok.type == TT.DEFINE:
             return self.parse_define()
-        # Function definition or global variable declaration
+        # 型別開頭 → 函式定義或全域變數宣告
         if tok.type in TYPE_TOKENS:
             return self.parse_func_or_global_var()
-        # Interactive / top-level statements (for, while, if, expr, ...)
+        # 其他 → 互動模式的頂層陳述句（for / while / if / 運算式…，免 main() 也能跑）
         stmt = self.parse_stmt()
         return stmt
 
@@ -117,6 +127,7 @@ class Parser:
         return Define(name_tok.value, value, line)
 
     def parse_func_or_global_var(self):
+        """讀完「型別 + 名字」後，用下一顆 token 區分：( → 函式，其他 → 變數。"""
         line = self.cur().line
         type_tok = self.advance()
         base_type = type_tok.value   # 'int' | 'char' | 'void'
@@ -129,11 +140,11 @@ class Parser:
         name_tok = self.expect(TT.IDENT, "Expected name")
         name = name_tok.value
 
-        # Function definition
+        # 核心判斷：名字後面接 '(' → 是函式定義
         if self.cur_type() == TT.LPAREN:
             return self.parse_func_def(base_type, name, line)
 
-        # Global variable declaration
+        # 否則 → 全域變數宣告
         return self.parse_var_decl_tail(base_type, name, is_pointer, line)
 
     def parse_func_def(self, return_type, name, line):
@@ -188,14 +199,15 @@ class Parser:
         return Block(stmts, line)
 
     def parse_stmt(self):
+        """【陳述句分派中心】看開頭 token，決定要解析成哪種陳述句。"""
         tok = self.cur()
         line = tok.line
 
-        if tok.type == TT.SEMI:
+        if tok.type == TT.SEMI:          # 空陳述句 ;
             self.advance()
             return None
 
-        if tok.type == TT.LBRACE:
+        if tok.type == TT.LBRACE:        # { ... } 區塊
             return self.parse_block()
 
         if tok.type == TT.DEFINE:
@@ -238,7 +250,7 @@ class Parser:
             self.expect(TT.SEMI)
             return Return(expr, line)
 
-        # Expression statement
+        # 以上都不是 → 當作「運算式 + 分號」（如 x = 5; 或 printf(...);）
         expr = self.parse_expr()
         self.expect(TT.SEMI)
         return ExprStmt(expr, line)
@@ -344,16 +356,18 @@ class Parser:
         return DoWhile(body, cond, line)
 
     def parse_switch(self):
+        """【switch 解析｜加分功能】把每個 case 的值與其底下的陳述句收集成清單。"""
         line = self.cur().line
-        self.advance()                          # consume 'switch'
+        self.advance()                          # 吃掉 'switch'
         self.expect(TT.LPAREN, "Expected '(' after switch")
         expr = self.parse_expr()
         self.expect(TT.RPAREN, "Expected ')' after switch expression")
         self.expect(TT.LBRACE, "Expected '{' to open switch body")
 
-        cases = []          # list of (value_node, [stmts])
+        cases = []          # 每項：(case 值節點, [該分支的陳述句])
         default_stmts = None
 
+        # 核心：一直讀，直到 } 收尾；碰到 case / default 就開一個新分支
         while self.cur_type() not in (TT.RBRACE, TT.EOF):
             if self.cur_type() == TT.CASE:
                 self.advance()
@@ -385,26 +399,47 @@ class Parser:
             return self.parse_block()
         return self.parse_stmt()
 
-    # ── Expressions (precedence climbing) ─────────────────────────────────
+    # ── 運算式：用「函式呼叫層次」表達運算子優先順序 ─────────────────────────
+    #
+    # 【整個 parser 最精華的設計】
+    #   越「晚」呼叫到的函式 = 越「高」優先順序（越先算）。呼叫鏈由低到高：
+    #     parse_assign  (=  +=)     ← 優先順序最低
+    #       parse_or    (||)
+    #       parse_and   (&&)
+    #       parse_bor / bxor / band (|  ^  &)
+    #       parse_equality   (==  !=)
+    #       parse_relational (<  <=  >  >=)
+    #       parse_shift      (<<  >>)
+    #       parse_additive   (+  -)
+    #       parse_multiplicative (*  /  %)
+    #       parse_unary  (-x  !x  *p  &x  ++x)
+    #       parse_postfix (a[i]  f()  i++)
+    #         parse_primary (數字 變數 (...))  ← 優先順序最高
+    #   所以 1 + 2 * 3 會自動讓 * 先結合，不必另寫優先順序表。
 
     def parse_expr(self):
-        return self.parse_assign()
+        return self.parse_assign()       # 從最低優先順序開始往下鑽
 
     def parse_assign(self):
+        """指定 =、+= …（右結合：a = b = c 先算右邊）。"""
         line = self.cur().line
         left = self.parse_or()
         op_tok = self.cur()
         if op_tok.type in (TT.ASSIGN, TT.PLUS_ASSIGN, TT.MINUS_ASSIGN,
                            TT.STAR_ASSIGN, TT.SLASH_ASSIGN, TT.PERCENT_ASSIGN):
             self.advance()
-            right = self.parse_assign()
+            right = self.parse_assign()   # 遞迴自己 → 右結合
             return Assign(op_tok.value, left, right, line)
         return left
 
     def parse_or(self):
+        # 【這以下每個二元運算函式都是同一個模式】
+        #   1. 先向「更高優先順序」要左運算元
+        #   2. 只要看到屬於本層的運算子，就再要右運算元，組成 BinaryOp
+        #   3. 用 while + left=... 達成左結合（a-b-c = (a-b)-c）
         line = self.cur().line
-        left = self.parse_and()
-        while self.cur_type() == TT.OR:
+        left = self.parse_and()                 # 左運算元（更高優先順序先算）
+        while self.cur_type() == TT.OR:         # 本層運算子是 ||
             op = self.advance().value
             right = self.parse_and()
             left = BinaryOp(op, left, right, line)
@@ -492,6 +527,7 @@ class Parser:
         return left
 
     def parse_unary(self):
+        """【前置一元運算】-x、!x、~x、*p（取值）、&x（取址）、++x/--x。"""
         line = self.cur().line
         tok = self.cur()
         if tok.type == TT.MINUS:
@@ -525,23 +561,24 @@ class Parser:
         return self.parse_postfix()
 
     def parse_postfix(self):
+        """【後置運算】處理緊跟在運算元後面的 a[i]（陣列）、f()（呼叫）、i++。"""
         line = self.cur().line
         expr = self.parse_primary()
         while True:
             tok = self.cur()
-            if tok.type == TT.LBRACKET:
+            if tok.type == TT.LBRACKET:           # a[i] 陣列存取
                 self.advance()
                 idx = self.parse_expr()
                 self.expect(TT.RBRACKET)
                 expr = ArrayAccess(expr, idx, line)
-            elif tok.type == TT.INC:
+            elif tok.type == TT.INC:              # i++ 後置遞增
                 self.advance()
                 expr = PostfixOp('++', expr, line)
-            elif tok.type == TT.DEC:
+            elif tok.type == TT.DEC:              # i-- 後置遞減
                 self.advance()
                 expr = PostfixOp('--', expr, line)
             elif tok.type == TT.LPAREN and isinstance(expr, Ident):
-                # Function call
+                # 名字後面接 '(' → 函式呼叫 f(...)
                 self.advance()
                 args = self.parse_args()
                 self.expect(TT.RPAREN)
@@ -561,6 +598,7 @@ class Parser:
         return args
 
     def parse_primary(self):
+        """【最高優先順序｜最基本單位】數字、字元、字串、變數名，或 ( 運算式 )。"""
         tok = self.cur()
         line = tok.line
 
@@ -580,7 +618,7 @@ class Parser:
             self.advance()
             return Ident(tok.value, line)
 
-        if tok.type == TT.LPAREN:
+        if tok.type == TT.LPAREN:        # 括號：強制提升優先順序，裡面重新從頭解析
             self.advance()
             expr = self.parse_expr()
             self.expect(TT.RPAREN)
@@ -609,14 +647,14 @@ class Parser:
 # ── Convenience functions ──────────────────────────────────────────────────
 
 def parse_source(source, start_line=1):
-    """Parse a complete Small-C program source string. Returns Program node."""
+    """【完整程式入口】原始碼字串 → Lexer 切 token → Parser 組樹 → 回傳 Program。"""
     lexer = Lexer(source, start_line)
     tokens = lexer.tokenize()
     parser = Parser(tokens)
     return parser.parse_program()
 
 def parse_stmts(source, start_line=1):
-    """Parse zero or more statements (for interactive mode). Returns list of nodes."""
+    """【互動模式入口】解析 0 到多個陳述句（給 sc> 直接輸入用），回傳節點清單。"""
     lexer = Lexer(source, start_line)
     tokens = lexer.tokenize()
     parser = Parser(tokens)

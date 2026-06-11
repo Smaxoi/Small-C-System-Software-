@@ -1,4 +1,11 @@
-# interpreter.py - Tree-walking interpreter for Small-C
+# interpreter.py - Small-C 的「樹狀走訪直譯器 (Tree-walking Interpreter)」
+#
+# 【這個檔案的核心任務】
+#   拿到 Parser 組好的語法樹 (AST)，「走訪」每個節點並實際執行它。
+#   兩大主角方法：
+#     _exec_stmt(節點) ── 執行「陳述句」（做事：迴圈、判斷、宣告…）
+#     _eval(節點)      ── 求值「運算式」（算出一個數值）
+#   搭配 memory.py 的 Memory（存值）與 Scope（找變數）。
 
 import sys
 import math
@@ -8,31 +15,34 @@ from nodes import *
 from memory import Memory, Scope, VarInfo
 from parser import parse_source, parse_stmts, ParseError
 
-# ── Control flow signals ───────────────────────────────────────────────────
+# ── 控制流程訊號 ─────────────────────────────────────────────────────────────
+# 【核心技巧】break / continue / return 用「丟例外」實作：
+#   在深層的迴圈裡丟出，由外層對應的 try/except 接住，就能跳出多層結構。
 
-class BreakSignal(Exception):    pass
-class ContinueSignal(Exception): pass
-class ReturnSignal(Exception):
+class BreakSignal(Exception):    pass   # 對應 break：跳出迴圈/switch
+class ContinueSignal(Exception): pass   # 對應 continue：跳到下一圈
+class ReturnSignal(Exception):          # 對應 return：帶回傳值跳出函式
     def __init__(self, value=0): self.value = value
-class ExitSignal(Exception):
+class ExitSignal(Exception):            # 對應 exit()：結束整個程式
     def __init__(self, code=0):  self.code = code
-class RuntimeError_(Exception):
+class RuntimeError_(Exception):         # 執行期錯誤（除以零、越界…），帶行號
     def __init__(self, msg, line=0):
         super().__init__(msg)
         self.line = line
 
-# ── Interpreter ────────────────────────────────────────────────────────────
+# ── 直譯器本體 ───────────────────────────────────────────────────────────────
 
 class Interpreter:
+    """走訪 AST 並執行程式；同時保存記憶體、變數、函式、#define 等狀態。"""
     def __init__(self):
-        self.mem = Memory()
-        self.global_scope = Scope()          # global / interactive scope
-        self.defines = {}                    # #define constants
-        self.user_funcs = {}                 # name -> FuncDef node
-        self.trace = False
-        self.program_lines = []              # stored program lines (for TRACE)
-        self.output_buffer = []              # collects print output (optional)
-        self._string_cache = {}             # literal -> addr (reuse literals)
+        self.mem = Memory()                  # 記憶體（存所有變數的值）
+        self.global_scope = Scope()          # 全域 / 互動模式的作用域
+        self.defines = {}                    # #define 常數表
+        self.user_funcs = {}                 # 使用者函式：{ 名字 -> FuncDef 節點 }
+        self.trace = False                   # TRACE 模式開關（逐行印出執行）
+        self.program_lines = []              # 程式原始碼（TRACE 顯示用）
+        self.output_buffer = []              # 輸出收集（選用）
+        self._string_cache = {}             # 字串常數快取：{ 內容 -> 位址 }（重複利用）
 
     def reset_runtime(self):
         """Reset memory and scope but keep program structure."""
@@ -91,40 +101,41 @@ class Interpreter:
     # ── Run a full program ─────────────────────────────────────────────────
 
     def run_program(self, source, program_lines=None):
-        """Parse, register, and run main(). Returns exit code."""
+        """【RUN 指令的進入點】解析整支程式 → 註冊函式 → 執行 main()，回傳結束碼。"""
         if program_lines:
             self.program_lines = program_lines
         try:
-            prog = parse_source(source)
+            prog = parse_source(source)       # 先把原始碼解析成語法樹
         except ParseError as e:
             print(f"Syntax error: line {e.line}: {e}")
             return 1
 
-        # Reset runtime state (memory, scopes) but keep defines/user_funcs
+        # 重置執行狀態（記憶體、作用域），每次 RUN 都從乾淨環境開始
         self.mem.reset()
         self._string_cache.clear()
         self.global_scope = Scope()
         self.user_funcs.clear()
         self.defines.clear()
 
-        self.register_program(prog)
+        self.register_program(prog)            # 先登記所有函式定義與 #define
 
-        # Execute global variable declarations
+        # 執行全域變數宣告
         for item in prog.items:
             if isinstance(item, VarDecl):
                 self._exec_var_decl(item, self.global_scope)
             elif isinstance(item, Define):
                 self._register_define(item)
 
-        # Collect any top-level executable statements (not decls / funcs / defines)
+        # 收集頂層可執行陳述句（排除宣告/函式/define）
         top_stmts = [item for item in prog.items
                      if not isinstance(item, (VarDecl, FuncDef, Define))]
 
+        # 【兩種執行模式】
         if 'main' not in self.user_funcs:
             if not top_stmts:
                 print("Error: no main() function defined.")
                 return 1
-            # Run top-level statements directly (script style)
+            # 模式 A：沒有 main() → 直接跑頂層陳述句（腳本模式，額外功能）
             try:
                 for stmt in top_stmts:
                     self._exec_stmt(stmt, self.global_scope)
@@ -141,6 +152,7 @@ class Interpreter:
                 print(f"Runtime error: {e}")
                 return 1
 
+        # 模式 B：有 main() → 從 main() 開始執行（標準 C 程式）
         try:
             ret = self._call_func('main', [])
             code = ret if ret is not None else 0
@@ -198,9 +210,11 @@ class Interpreter:
     # ── Statement executor ─────────────────────────────────────────────────
 
     def _exec_stmt(self, node, scope):
+        """【陳述句執行中樞】依節點型別呼叫對應的處理；TRACE 開啟時先印出該行。"""
         if node is None:
             return
 
+        # TRACE 模式：執行前先印 [line N] 原始碼內容
         if (self.trace and hasattr(node, 'line') and node.line > 0
                 and not isinstance(node, Block)):
             line_content = ''
@@ -208,6 +222,7 @@ class Interpreter:
                 line_content = self.program_lines[node.line - 1].strip()
             print(f"[line {node.line}] {line_content}")
 
+        # 核心：用節點型別決定怎麼執行（這就是 tree-walking）
         if isinstance(node, Block):
             self._exec_block(node, scope)
         elif isinstance(node, VarDecl):
@@ -223,14 +238,14 @@ class Interpreter:
         elif isinstance(node, SwitchStmt):
             self._exec_switch(node, scope)
         elif isinstance(node, Break):
-            raise BreakSignal()
+            raise BreakSignal()            # 丟訊號，由外層迴圈接住
         elif isinstance(node, Continue):
             raise ContinueSignal()
         elif isinstance(node, Return):
             val = 0
             if node.expr is not None:
-                val = self._eval(node.expr, scope)
-            raise ReturnSignal(val)
+                val = self._eval(node.expr, scope)   # 先算回傳值
+            raise ReturnSignal(val)        # 丟訊號帶值跳出函式
         elif isinstance(node, ExprStmt):
             self._eval(node.expr, scope)
         elif isinstance(node, Define):
@@ -241,7 +256,8 @@ class Interpreter:
             raise RuntimeError_(f"Unknown statement node: {type(node).__name__}")
 
     def _exec_block(self, node, parent_scope):
-        block_scope = Scope(parent_scope)
+        """執行 { } 區塊：開一層新作用域，裡面宣告的變數出了區塊就消失。"""
+        block_scope = Scope(parent_scope)    # 核心：巢狀作用域，外層變數仍看得到
         for stmt in node.stmts:
             if stmt is not None:
                 self._exec_stmt(stmt, block_scope)
@@ -291,21 +307,22 @@ class Interpreter:
                 continue
 
     def _exec_for(self, node, scope):
-        for_scope = Scope(scope)
+        """執行 for：init 跑一次 → 每圈先檢查 cond → 跑 body → 跑 incr。"""
+        for_scope = Scope(scope)             # for 自己一層作用域，讓 i 活在迴圈裡
         if node.init is not None:
             self._exec_stmt(node.init, for_scope)
         while True:
             if node.cond is not None:
                 if not self._eval(node.cond, for_scope):
-                    break
+                    break                    # 條件不成立 → 結束迴圈
             try:
                 self._exec_stmt(node.body, for_scope)
             except BreakSignal:
-                break
+                break                        # break → 跳出整個迴圈
             except ContinueSignal:
-                pass
+                pass                         # continue → 跳過剩下，但仍要做 incr
             if node.incr is not None:
-                self._eval(node.incr, for_scope)
+                self._eval(node.incr, for_scope)   # 核心：continue 後仍會執行遞增
 
     def _exec_do_while(self, node, scope):
         while True:
@@ -319,47 +336,48 @@ class Interpreter:
                 break
 
     def _exec_switch(self, node, scope):
-        val = self._eval(node.expr, scope)
+        """【switch 執行｜加分功能】用 matched 旗標實現 C 的 fall-through。"""
+        val = self._eval(node.expr, scope)   # 先算出要比對的值
         matched = False
         try:
             for case_val_node, stmts in node.cases:
                 if not matched:
                     case_val = self._eval(case_val_node, scope)
                     if val == case_val:
-                        matched = True
+                        matched = True       # 核心：一旦命中就設 True
                 if matched:
                     for s in stmts:
-                        self._exec_stmt(s, scope)
+                        self._exec_stmt(s, scope)   # 命中後每個 case 都執行（直到 break）
             if not matched and node.default_stmts is not None:
-                for s in node.default_stmts:
+                for s in node.default_stmts:        # 全沒命中才跑 default
                     self._exec_stmt(s, scope)
         except BreakSignal:
-            pass   # break exits the switch
+            pass   # 核心：break 在這裡被接住 → 跳出整個 switch
 
     # ── Expression evaluator ───────────────────────────────────────────────
 
     def _eval(self, node, scope):
-        """Evaluate expression node; return integer value."""
+        """【運算式求值中樞】走訪運算式節點，算出並回傳一個整數值。"""
 
-        if isinstance(node, IntLit):
+        if isinstance(node, IntLit):         # 整數字面值：直接回傳
             return node.value
 
-        if isinstance(node, CharLit):
+        if isinstance(node, CharLit):        # 字元：回傳 ASCII 整數
             return node.value
 
-        if isinstance(node, StrLit):
+        if isinstance(node, StrLit):         # 字串：配置記憶體，回傳起始位址
             return self.alloc_string(node.value)
 
-        if isinstance(node, Ident):
-            # Check #define first
+        if isinstance(node, Ident):          # 變數名
+            # 核心順序：先查 #define 常數，再查作用域裡的變數
             if node.name in self.defines:
                 return self.defines[node.name]
             info = scope.lookup(node.name)
             if info is None:
                 raise RuntimeError_(f"Undefined variable '{node.name}'", node.line)
             if info.is_array:
-                return info.addr   # array decays to pointer
-            return self.mem.read(info.addr)
+                return info.addr   # 陣列名退化成「起始位址」（指標）
+            return self.mem.read(info.addr)   # 一般變數：去記憶體把值讀出來
 
         if isinstance(node, ArrayAccess):
             base_addr = self._eval_array_base(node.base, scope)
@@ -417,7 +435,7 @@ class Interpreter:
         return self._eval(node, scope)
 
     def _eval_lvalue(self, node, scope):
-        """Return (address, is_in_bounds_checked) for an lvalue node."""
+        """【取「位址」而非「值」】指定 (x=…)、取址 (&x) 時要的是變數放在哪，不是它的值。"""
         if isinstance(node, Ident):
             info = scope.lookup(node.name)
             if info is None:
@@ -479,21 +497,23 @@ class Interpreter:
         return val  # postfix returns old value
 
     def _eval_binary(self, node, scope):
+        """【二元運算求值】+ - * / 比較 位元…；&& || 做短路求值。"""
         op = node.op
-        # Short-circuit evaluation
+        # 核心：短路求值 —— && 左邊假就不算右邊，|| 左邊真就不算右邊
         if op == '&&':
             left = self._eval(node.left, scope)
             if not left:
-                return 0
+                return 0                      # 左假 → 直接 0，右邊不執行
             right = self._eval(node.right, scope)
             return 1 if right else 0
         if op == '||':
             left = self._eval(node.left, scope)
             if left:
-                return 1
+                return 1                      # 左真 → 直接 1，右邊不執行
             right = self._eval(node.right, scope)
             return 1 if right else 0
 
+        # 其餘運算子：左右都先算出來再運算
         left = self._eval(node.left, scope)
         right = self._eval(node.right, scope)
 
@@ -503,7 +523,7 @@ class Interpreter:
         if op == '/':
             if right == 0:
                 raise RuntimeError_("division by zero", node.line)
-            # C integer division (truncate toward zero)
+            # 核心：int(left/right) 是「往零截斷」，符合 C（-15/4 = -3，非 Python 的 -4）
             return int(left / right)
         if op == '%':
             if right == 0:
@@ -547,28 +567,31 @@ class Interpreter:
     # ── Function calls ─────────────────────────────────────────────────────
 
     def _eval_func_call(self, node, scope):
+        """函式呼叫：先找內建函式，找不到再找使用者定義的函式。"""
         name = node.name
         args = node.args
 
-        # Built-in functions
+        # 先查內建函式（printf、strlen…）
         builtin = self._get_builtin(name)
         if builtin is not None:
             return builtin(node, args, scope)
 
-        # User-defined function
+        # 再查使用者自己寫的函式
         if name not in self.user_funcs:
             raise RuntimeError_(f"Undefined function '{name}'", node.line)
         return self._call_func(name, args, scope, node.line)
 
     def _call_func(self, name, args, caller_scope=None, line=0):
+        """【函式呼叫核心】開新作用域、綁定參數（傳值）、執行本體、接住 return。"""
         func = self.user_funcs[name]
+        # 核心：新函式作用域的 parent 是「全域」，不是呼叫者 → 函式內看不到呼叫者的區域變數
         func_scope = Scope(self.global_scope, func_name=name)
 
-        # Bind parameters
+        # 綁定參數：把每個引數的值複製進新作用域（by value 傳值）
         for i, param in enumerate(func.params):
             if i < len(args):
                 if caller_scope is not None:
-                    # Evaluate argument in caller's scope
+                    # 核心：引數在「呼叫者的作用域」求值（fact(n-1) 裡的 n 是呼叫者的 n）
                     arg_node = args[i] if not isinstance(args[i], int) else None
                     if arg_node is not None:
                         arg_val = self._eval(arg_node, caller_scope)
@@ -585,16 +608,17 @@ class Interpreter:
             func_scope.define(param.name, info)
             self.mem.write(addr, arg_val)
 
-        # Execute function body
+        # 執行函式本體；用 return 丟出的 ReturnSignal 接住回傳值
         try:
             self._exec_block(func.body, func_scope)
-            return 0  # no explicit return
+            return 0  # 沒有 return → 預設回傳 0
         except ReturnSignal as r:
-            return r.value
+            return r.value   # 核心：return 的值在這裡被接住並回傳給呼叫端
 
-    # ── Built-in functions ─────────────────────────────────────────────────
+    # ── 內建函式 ─────────────────────────────────────────────────────────────
 
     def _get_builtin(self, name):
+        """【內建函式查表】用名字找到對應的 Python 實作方法；找不到回 None。"""
         builtins = {
             'printf':   self._bi_printf,
             'scanf':    self._bi_scanf,
@@ -636,21 +660,20 @@ class Interpreter:
 
     # I/O
     def _bi_printf(self, node, args, scope):
+        """【printf】第 0 個引數是格式字串位址，其餘是要填入的值。"""
         if not args:
             raise RuntimeError_("printf: missing format string", node.line)
         fmt_addr = self._eval(args[0], scope)
-        fmt = self.mem.read_string(fmt_addr)
-        arg_vals = [self._eval(a, scope) for a in args[1:]]
-        result = self._format_string(fmt, arg_vals, scope)
+        fmt = self.mem.read_string(fmt_addr)              # 從記憶體讀出格式字串
+        arg_vals = [self._eval(a, scope) for a in args[1:]]  # 其餘引數逐一求值
+        result = self._format_string(fmt, arg_vals, scope)   # 套用 %d %s … 格式
         sys.stdout.write(result)
         sys.stdout.flush()
         return len(result)
 
     def _format_string(self, fmt, arg_vals, scope=None):
-        """Format a C printf-style format string.
-        Supports: %d %c %s %x %X %o %%
-        Flags:    - (left-align)  0 (zero-pad)
-        Width:    %5d  %-5d  %05d
+        """【格式化核心】手動解析 %[旗標][寬度]轉換碼，支援 %d %c %s %x %X %o %%。
+        旗標：- 靠左、0 補零；寬度：%5d %-5d %05d。
         """
         result = []
         i = 0
@@ -917,47 +940,47 @@ class Interpreter:
         raise ExitSignal(code)
 
     def _bi_strrev(self, node, args, scope):
-        """strrev(dst, src) — reverse src into dst; also returns dst addr."""
+        """【strrev｜額外功能】strrev(dst, src)：把 src 反轉寫進 dst。"""
         if len(args) < 2:
             raise RuntimeError_("strrev: expected 2 arguments", node.line)
         dst_addr = self._eval(args[0], scope)
         src_addr = self._eval(args[1], scope)
         s = self.mem.read_string(src_addr)
-        self.mem.write_string(dst_addr, s[::-1])
+        self.mem.write_string(dst_addr, s[::-1])   # 核心：Python 切片 [::-1] 反轉
         return dst_addr
 
-    # strtok state
+    # 【strtok 的「靜態狀態」】這兩個變數跨呼叫保留，模擬 C 裡 strtok 的 static
     _strtok_str  = ""
     _strtok_pos  = 0
 
     def _bi_strtok(self, node, args, scope):
-        """strtok(str, delim) — C-style tokenizer; pass 0/NULL for continuation."""
+        """【strtok｜額外功能】分詞器：第一次傳字串，之後傳 0 接續上次位置。"""
         if len(args) < 2:
             raise RuntimeError_("strtok: expected 2 arguments", node.line)
         str_val  = self._eval(args[0], scope)
         delim_addr = self._eval(args[1], scope)
         delim = self.mem.read_string(delim_addr)
-        if str_val != 0:
+        if str_val != 0:                       # 核心：非 0 → 新字串，重設狀態
             self._strtok_str = self.mem.read_string(str_val)
             self._strtok_pos = 0
         s   = self._strtok_str
         pos = self._strtok_pos
-        # skip leading delimiters
-        while pos < len(s) and s[pos] in delim:
+        while pos < len(s) and s[pos] in delim:   # 跳過開頭的分隔符
             pos += 1
         if pos >= len(s):
-            return 0  # NULL
+            return 0  # 沒有更多 token → 回傳 NULL(0)
         start = pos
-        while pos < len(s) and s[pos] not in delim:
+        while pos < len(s) and s[pos] not in delim:   # 一路吃到下一個分隔符
             pos += 1
         token = s[start:pos]
-        self._strtok_pos = pos + 1
+        self._strtok_pos = pos + 1             # 記住位置，下次接續
         addr = self.alloc_string(token)
         return addr
 
     # ── VARS display ───────────────────────────────────────────────────────
 
     def show_vars(self, scope=None):
+        """【VARS 指令】列出目前看得到的所有變數（名稱、型別、值；陣列展開內容）。"""
         if scope is None:
             scope = self.global_scope
         all_vars = scope.all_vars()
@@ -989,7 +1012,7 @@ class Interpreter:
     # ── MEMSHOW display ────────────────────────────────────────────────────
 
     def show_memory(self, scope=None):
-        """Display memory layout: named variables + string literals."""
+        """【MEMSHOW 指令｜額外功能】畫出記憶體配置圖：變數位址/型別/值 + 字串常數。"""
         if scope is None:
             scope = self.global_scope
 
@@ -1085,6 +1108,7 @@ class Interpreter:
     # ── FUNCS display ──────────────────────────────────────────────────────
 
     def show_funcs(self):
+        """【FUNCS 指令】列出使用者定義的函式（含簽章與行號）＋所有內建函式。"""
         print("User-defined functions:")
         if not self.user_funcs:
             print("  (none)")

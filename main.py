@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# main.py - Small-C Interactive Interpreter shell
+# main.py - Small-C 互動式解譯器的「互動介面 (Shell / REPL)」
+#
+# 【這個檔案的核心任務】
+#   提供 sc> 提示符，讓使用者輸入指令（APPEND/LIST/RUN…）或直接打 Small-C 程式碼。
+#   它負責「指令分派、程式碼編輯、語法高亮、主題切換」，真正的執行交給 interpreter.py。
 
 import os
 import sys
@@ -10,7 +14,7 @@ from memory import Scope
 from parser import ParseError
 from lexer import LexError
 
-# ── Syntax highlighting ────────────────────────────────────────────────────
+# ── 語法高亮 ────────────────────────────────────────────────────────────────
 
 _C_KEYWORDS = frozenset({
     'int', 'char', 'void', 'if', 'else', 'while', 'for', 'do',
@@ -59,11 +63,12 @@ def _apply_theme(name: str) -> bool:
     return True
 
 def _colorize(line: str) -> str:
-    """Return a syntax-highlighted version of one source line."""
+    """【語法高亮｜額外功能】手動掃描一行字元，幫關鍵字/字串/數字/註解上不同顏色。"""
     out = []
     i   = 0
     n   = len(line)
 
+    # 核心：逐字元判斷目前是哪種語法元素，包上對應的 ANSI 顏色碼
     while i < n:
         # ── Line comment ──────────────────────────────────────────────
         if line[i:i+2] == '//':
@@ -167,12 +172,14 @@ SEMESTER = "Spring 2026"
 PROMPT  = "sc> "
 CONT_PROMPT = "  > "   # continuation prompt for multi-line input
 
-_CTRL_C = object()     # sentinel: user pressed Ctrl+C
+# 【Ctrl+C 哨兵｜額外功能】用一個獨一無二的物件代表「使用者按了 Ctrl+C」，
+# 不能用 '' 或 None，因為它們在輸入中有正常意義（空行、EOF）。
+_CTRL_C = object()
 
-# ── Brace/completeness check ───────────────────────────────────────────────
+# ── 括號完整性檢查 ────────────────────────────────────────────────────────────
 
 def count_depth(text):
-    """Count net unclosed braces outside strings/comments."""
+    """算大括號淨深度（忽略字串/註解內的）；>0 代表還有沒收尾的 {。"""
     depth = 0
     in_str = False
     in_char = False
@@ -217,7 +224,7 @@ def count_depth(text):
 
 
 def is_input_complete(text):
-    """Return True if the accumulated input looks syntactically complete."""
+    """【判斷多行輸入是否完整】決定要不要再進連續輸入模式 ( > )。"""
     stripped = text.strip()
     if not stripped:
         return True
@@ -232,25 +239,27 @@ def is_input_complete(text):
 # ── Shell state ────────────────────────────────────────────────────────────
 
 class Shell:
+    """【互動 Shell】保存目前編輯中的程式、檔案狀態，並驅動整個 REPL 迴圈。"""
     def __init__(self):
         self.interp = Interpreter()
-        self.program_lines = []    # list of str, no trailing newline
-        self.modified = False      # unsaved changes flag
+        self.program_lines = []    # 目前編輯中的程式（一行一個字串）
+        self.modified = False      # 有沒有未存檔的修改
         self.current_file = None
 
-    # ── Input helpers ──────────────────────────────────────────────────────
+    # ── 輸入輔助 ──────────────────────────────────────────────────────────────
 
     def read_line(self, prompt=''):
+        """【統一的讀一行】把 Ctrl+D 轉成 None、Ctrl+C 轉成 _CTRL_C 哨兵。"""
         try:
             return input(prompt)
         except EOFError:
-            return None
+            return None              # Ctrl+D / Ctrl+Z → 結束
         except KeyboardInterrupt:
             print("  ^C")
-            return _CTRL_C
+            return _CTRL_C           # 核心：Ctrl+C → 回傳哨兵，讓上層優雅取消
 
     def read_multiline(self, first_line):
-        """Accumulate lines until input is syntactically complete."""
+        """【連續輸入】只要輸入還沒完整（如 { 沒收尾），就持續顯示 > 收集後續行。"""
         lines = [first_line]
         accumulated = first_line
         while not is_input_complete(accumulated):
@@ -319,16 +328,17 @@ class Shell:
         print(help_text)
 
     def cmd_append(self):
+        """【APPEND 指令｜含自動縮排額外功能】逐行輸入程式，以單獨一行 '.' 結束。"""
         start_line = len(self.program_lines) + 1
         print(f"(Enter lines; type '.' alone to finish. Auto-indent ON.)")
         lineno = start_line
-        depth  = 0          # current indent level
-        INDENT = 4          # spaces per level
+        depth  = 0          # 目前縮排層數（看到 { 就 +1、} 就 -1）
+        INDENT = 4          # 每層幾個空格
         DIM    = "\033[90m"
         RST    = "\033[0m"
 
         while True:
-            # 深度提示放在 │ 後面，不佔輸入空間，使用者可自由退格到最左
+            # 深度提示（+4）放在 │ 後面只是顯示，不佔輸入空間，使用者可自由退格到最左
             hint = f"{DIM}+{depth*INDENT}{RST} " if depth > 0 else "  "
             raw = self.read_line(f"{lineno:4d}│{hint}")
             if raw is None or raw is _CTRL_C:
@@ -339,15 +349,15 @@ class Shell:
             if text == '.':
                 break
 
-            # Lines starting with '}' are stored one level back
+            # 以 '}' 開頭的行存的時候退一層，視覺上對齊開頭的 {
             store_depth = max(0, depth - 1) if text.startswith('}') else depth
-            stored_line = (' ' * (store_depth * INDENT)) + text if text else ''
+            stored_line = (' ' * (store_depth * INDENT)) + text if text else ''  # 核心：存檔時補上空格縮排
 
             self.program_lines.append(stored_line)
             self.modified = True
             lineno += 1
 
-            # Update depth for next line
+            # 核心：依本行的 { } 數量更新下一行的縮排深度
             depth = max(0, depth + text.count('{') - text.count('}'))
 
     def cmd_list(self, arg):
@@ -533,6 +543,7 @@ class Shell:
         self.interp.show_memory(self.interp.global_scope)
 
     def cmd_color(self, arg):
+        """【COLOR 指令｜額外功能】無參數 → 顯示主題預覽；有參數 → 切換語法高亮主題。"""
         R = "\033[0m"; B = "\033[1m"
         name = arg.strip().lower()
         if not name:
@@ -570,13 +581,14 @@ class Shell:
     # ── Main command dispatcher ────────────────────────────────────────────
 
     def dispatch(self, raw):
+        """【指令分派中心】判斷輸入是內建指令還是 Small-C 程式碼，分別處理。"""
         line = raw.strip()
         if not line:
             return False
 
         upper = line.upper()
         parts = line.split(None, 1)
-        cmd = parts[0].upper()
+        cmd = parts[0].upper()              # 指令大小寫不敏感
         arg = parts[1] if len(parts) > 1 else ''
 
         if cmd == 'ABOUT':
@@ -618,8 +630,8 @@ class Shell:
         elif cmd in ('QUIT', 'EXIT'):
             return self.cmd_quit()
         else:
-            # Treat as Small-C code (interactive execution)
-            full_input = self.read_multiline(raw)
+            # 不是任何指令 → 當成 Small-C 程式碼，直接互動執行
+            full_input = self.read_multiline(raw)   # 若括號未閉合，會繼續收行
             self.interp.exec_interactive(full_input)
         return False
 
@@ -676,24 +688,43 @@ class Shell:
         print(f"  {DIM}sc>{R} {C}printf(\"%d\\n\", 3 + 4 * 5);{R}")
         print(f"  {DIM}sc>{R} {C}int x = 42;  printf(\"%d\\n\", x);{R}")
         print()
+        # 【REPL 主迴圈】讀一行 → 分派處理 → 重複，直到 QUIT 或 EOF
         while True:
             line = self.read_line(PROMPT)
-            if line is None:          # EOF (Ctrl+D / Ctrl+Z)
+            if line is None:          # Ctrl+D / Ctrl+Z（EOF）→ 結束
                 print()
                 print("Goodbye!")
                 break
-            if line is _CTRL_C:       # Ctrl+C at main prompt → 回到提示符
+            if line is _CTRL_C:       # 核心：Ctrl+C → 什麼都不做，回到 sc> 提示符
                 continue
             should_exit = self.dispatch(line)
-            if should_exit:
+            if should_exit:           # QUIT/EXIT 指令會回傳 True
                 break
 
 
-# ── Entry point ────────────────────────────────────────────────────────────
+# ── 程式進入點 ────────────────────────────────────────────────────────────────
+#
+# 用法：
+#   python main.py                  → 直接進入互動模式 sc>
+#   python main.py prog.c           → 載入 prog.c 後進入互動模式（可繼續編輯/RUN）
+#   python main.py --run prog.c     → 載入 prog.c、自動執行、印出結果後直接離開（批次模式）
 
 if __name__ == '__main__':
     shell = Shell()
-    # Optional: load a file from command line
-    if len(sys.argv) > 1:
-        shell.cmd_load(sys.argv[1])
+    args = sys.argv[1:]
+
+    # 解析 --run 旗標（批次執行模式）
+    run_mode = False
+    if '--run' in args:
+        run_mode = True
+        args = [a for a in args if a != '--run']
+
+    # 有給檔名就先載入
+    if args:
+        shell.cmd_load(args[0])
+        if run_mode:
+            shell.cmd_run()      # 批次模式：載入後直接執行
+            sys.exit(0)          # 執行完就離開，不進互動模式（適合自動化測試）
+
+    # 一般情況：進入互動 REPL
     shell.run()

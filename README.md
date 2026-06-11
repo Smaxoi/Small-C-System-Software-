@@ -434,6 +434,19 @@ python test_runner.py
 
 # 27 項對應評分標準 Test A 的驗收測試
 python test_verification.py
+
+# 13 組對照式測試（每個 .sc 比對同名 .expected 預期輸出）
+python run_tests.py
+```
+
+### 批次執行單一程式（不進互動模式）
+
+```bash
+# 載入並進入互動模式 sc>（可繼續編輯 / RUN）
+python main.py prog.c
+
+# 載入、自動執行、印出結果後直接離開（適合自動化與快速 demo）
+python main.py --run prog.c
 ```
 
 ### 測試涵蓋範圍
